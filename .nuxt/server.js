@@ -1,39 +1,61 @@
-import Vue from 'vue'
-import clone from 'clone'
 import { stringify } from 'querystring'
-import { omit } from 'lodash'
-import middleware from './middleware'
-import { createApp, NuxtError } from './index'
-import { applyAsyncData, sanitizeComponent, getMatchedComponents, getContext, middlewareSeries, promisify, urlJoin } from './utils'
+import Vue from 'vue'
+import fetch from 'node-fetch'
+import middleware from './middleware.js'
+import {
+  applyAsyncData,
+  middlewareSeries,
+  sanitizeComponent,
+  getMatchedComponents,
+  promisify
+} from './utils.js'
+import fetchMixin from './mixins/fetch.server'
+import { createApp, NuxtError } from './index.js'
+import NuxtLink from './components/nuxt-link.server.js' // should be included after ./index.js
 
-const debug = require('debug')('nuxt:render')
-debug.color = 4 // force blue color
+// Update serverPrefetch strategy
+Vue.config.optionMergeStrategies.serverPrefetch = Vue.config.optionMergeStrategies.created
 
-const isDev = true
+// Fetch mixin
+if (!Vue.__nuxt__fetch__mixin__) {
+  Vue.mixin(fetchMixin)
+  Vue.__nuxt__fetch__mixin__ = true
+}
 
-const noopApp = () => new Vue({ render: (h) => h('div') })
+// Component: <NuxtLink>
+Vue.component(NuxtLink.name, NuxtLink)
+Vue.component('NLink', NuxtLink)
 
-const createNext = context => opts => {
-  context.redirected = opts
-  // If nuxt generate
-  if (!context.res) {
-    context.nuxt.serverRendered = false
+if (!global.fetch) { global.fetch = fetch }
+
+const noopApp = () => new Vue({ render: h => h('div') })
+
+function urlJoin () {
+  return Array.prototype.slice.call(arguments).join('/').replace(/\/+/g, '/')
+}
+
+const createNext = ssrContext => (opts) => {
+  // If static target, render on client-side
+  ssrContext.redirected = opts
+  if (ssrContext.target === 'static' || !ssrContext.res) {
+    ssrContext.nuxt.serverRendered = false
     return
   }
   opts.query = stringify(opts.query)
   opts.path = opts.path + (opts.query ? '?' + opts.query : '')
-  if (opts.path.indexOf('http') !== 0 && ('/' !== '/' && opts.path.indexOf('/') !== 0)) {
-    opts.path = urlJoin('/', opts.path)
+  const routerBase = '/'
+  if (!opts.path.startsWith('http') && (routerBase !== '/' && !opts.path.startsWith(routerBase))) {
+    opts.path = urlJoin(routerBase, opts.path)
   }
   // Avoid loop redirect
-  if (opts.path === context.url) {
-    context.redirected = false
+  if (opts.path === ssrContext.url) {
+    ssrContext.redirected = false
     return
   }
-  context.res.writeHead(opts.status, {
-    'Location': opts.path
+  ssrContext.res.writeHead(opts.status, {
+    Location: opts.path
   })
-  context.res.end()
+  ssrContext.res.end()
 }
 
 // This exported function will be called by `bundleRenderer`.
@@ -41,137 +63,201 @@ const createNext = context => opts => {
 // state of our application before actually rendering it.
 // Since data fetching is async, this function is expected to
 // return a Promise that resolves to the app instance.
-export default async context => {
-  // Create context.next for simulate next() of beforeEach() when wanted to redirect
-  context.redirected = false
-  context.next = createNext(context)
-  context.beforeRenderFns = []
-
-  const { app, router, store } = await createApp(context)
+export default async (ssrContext) => {
+  // Create ssrContext.next for simulate next() of beforeEach() when wanted to redirect
+  ssrContext.redirected = false
+  ssrContext.next = createNext(ssrContext)
+  // Used for beforeNuxtRender({ Components, nuxtState })
+  ssrContext.beforeRenderFns = []
+  // Nuxt object (window.{{globals.context}}, defaults to window.__NUXT__)
+  ssrContext.nuxt = { layout: 'default', data: [], fetch: [], error: null, state: null, serverRendered: true, routePath: '' }
+  // Remove query from url is static target
+  if (process.static && ssrContext.url) {
+    ssrContext.url = ssrContext.url.split('?')[0]
+  }
+  // Public runtime config
+  ssrContext.nuxt.config = ssrContext.runtimeConfig.public
+  // Create the app definition and the instance (created for each request)
+  const { app, router, store } = await createApp(ssrContext, { ...ssrContext.runtimeConfig.public, ...ssrContext.runtimeConfig.private })
   const _app = new Vue(app)
+  // Add ssr route path to nuxt context so we can account for page navigation between ssr and csr
+  ssrContext.nuxt.routePath = app.context.route.path
 
-  
-  // Add store to the context
-  context.store = store
-  
+  // Add meta infos (used in renderer.js)
+  ssrContext.meta = _app.$meta()
 
-  // Add route to the context
-  context.route = router.currentRoute
+  // Keep asyncData for each matched component in ssrContext (used in app/utils.js via this.$ssrContext)
+  ssrContext.asyncData = {}
 
-  // Nuxt object
-  context.nuxt = { layout: 'default', data: [], error: null, state: null, serverRendered: true }
+  const beforeRender = async () => {
+    // Call beforeNuxtRender() methods
+    await Promise.all(ssrContext.beforeRenderFns.map(fn => promisify(fn, { Components, nuxtState: ssrContext.nuxt })))
 
-  // Add meta infos
-  context.meta = _app.$meta()
-
-  // Error function
-  context.error = _app.$options._nuxt.error.bind(_app)
-
-  // Keep asyncData for each matched component in context
-  context.asyncData = {}
-
-  // Create shared ctx
-  const ctx = getContext(context, app)
-
-  const s = isDev && Date.now()
-
-  // Resolve components
-  let Components = []
-  try {
-    Components = await Promise.all(getMatchedComponents(router.match(context.url)).map(Component => {
-      if (typeof Component !== 'function' || Component.cid) {
-        return sanitizeComponent(Component)
-      }
-      return Component().then(Component => sanitizeComponent(Component))
-    }))
-  } catch (err) {
-    // Throw back error to renderRoute()
-    throw err
+    ssrContext.rendered = () => {
+      // Add the state from the vuex store
+      ssrContext.nuxt.state = store.state
+    }
   }
 
-  
-  // Dispatch store nuxtServerInit
+  const renderErrorPage = async () => {
+    // Don't server-render the page in static target
+    if (ssrContext.target === 'static') {
+      ssrContext.nuxt.serverRendered = false
+    }
+
+    // Load layout for error page
+    const layout = (NuxtError.options || NuxtError).layout
+    const errLayout = typeof layout === 'function' ? layout.call(NuxtError, app.context) : layout
+    ssrContext.nuxt.layout = errLayout || 'default'
+    await _app.loadLayout(errLayout)
+    _app.setLayout(errLayout)
+
+    await beforeRender()
+    return _app
+  }
+  const render404Page = () => {
+    app.context.error({ statusCode: 404, path: ssrContext.url, message: 'This page could not be found' })
+    return renderErrorPage()
+  }
+
+  const s = Date.now()
+
+  // Components are already resolved by setContext -> getRouteData (app/utils.js)
+  const Components = getMatchedComponents(router.match(ssrContext.url))
+
+  /*
+  ** Dispatch store nuxtServerInit
+  */
   if (store._actions && store._actions.nuxtServerInit) {
-    await store.dispatch('nuxtServerInit', ctx)
+    try {
+      await store.dispatch('nuxtServerInit', app.context)
+    } catch (err) {
+      console.debug('Error occurred when calling nuxtServerInit: ', err.message)
+      throw err
+    }
   }
-  // ...If there is a redirect
-  if (context.redirected) return noopApp()
-  
+  // ...If there is a redirect or an error, stop the process
+  if (ssrContext.redirected) {
+    return noopApp()
+  }
+  if (ssrContext.nuxt.error) {
+    return renderErrorPage()
+  }
 
-  // Call global middleware (nuxt.config.js)
+  /*
+  ** Call global middleware (nuxt.config.js)
+  */
   let midd = []
   midd = midd.map((name) => {
+    if (typeof name === 'function') {
+      return name
+    }
     if (typeof middleware[name] !== 'function') {
-      context.nuxt.error = context.error({ statusCode: 500, message: 'Unknown middleware ' + name })
+      app.context.error({ statusCode: 500, message: 'Unknown middleware ' + name })
     }
     return middleware[name]
   })
-  if (!context.nuxt.error) {
-    await middlewareSeries(midd, ctx)
+  await middlewareSeries(midd, app.context)
+  // ...If there is a redirect or an error, stop the process
+  if (ssrContext.redirected) {
+    return noopApp()
   }
-  // ...If there is a redirect
-  if (context.redirected) return noopApp()
+  if (ssrContext.nuxt.error) {
+    return renderErrorPage()
+  }
 
-  // Set layout
+  /*
+  ** Set layout
+  */
   let layout = Components.length ? Components[0].options.layout : NuxtError.layout
-  if (typeof layout === 'function') layout = layout(ctx)
+  if (typeof layout === 'function') {
+    layout = layout(app.context)
+  }
   await _app.loadLayout(layout)
+  if (ssrContext.nuxt.error) {
+    return renderErrorPage()
+  }
   layout = _app.setLayout(layout)
-  // ...Set layout to __NUXT__
-  context.nuxt.layout = _app.layoutName
+  ssrContext.nuxt.layout = _app.layoutName
 
-  // Call middleware (layout + pages)
-  if (!context.nuxt.error) {
-    midd = []
-    if (layout.middleware) midd = midd.concat(layout.middleware)
-    Components.forEach((Component) => {
-      if (Component.options.middleware) {
-        midd = midd.concat(Component.options.middleware)
-      }
-    })
-    midd = midd.map((name) => {
-      if (typeof middleware[name] !== 'function') {
-        context.nuxt.error = context.error({ statusCode: 500, message: 'Unknown middleware ' + name })
-      }
-      return middleware[name]
-    })
+  /*
+  ** Call middleware (layout + pages)
+  */
+  midd = []
 
-    await middlewareSeries(midd, ctx)
-
-    // If there is a redirect
-    if (context.redirected) return noopApp()
+  layout = sanitizeComponent(layout)
+  if (layout.options.middleware) {
+    midd = midd.concat(layout.options.middleware)
   }
 
-  // Call .validate()
-  let isValid = true
   Components.forEach((Component) => {
-    if (!isValid) return
-    if (typeof Component.options.validate !== 'function') return
-    isValid = Component.options.validate({
-      params: context.route.params || {},
-      query: context.route.query  || {},
-      store: ctx.store
-    })
+    if (Component.options.middleware) {
+      midd = midd.concat(Component.options.middleware)
+    }
   })
+  midd = midd.map((name) => {
+    if (typeof name === 'function') {
+      return name
+    }
+    if (typeof middleware[name] !== 'function') {
+      app.context.error({ statusCode: 500, message: 'Unknown middleware ' + name })
+    }
+    return middleware[name]
+  })
+  await middlewareSeries(midd, app.context)
+  // ...If there is a redirect or an error, stop the process
+  if (ssrContext.redirected) {
+    return noopApp()
+  }
+  if (ssrContext.nuxt.error) {
+    return renderErrorPage()
+  }
+
+  /*
+  ** Call .validate()
+  */
+  let isValid = true
+  try {
+    for (const Component of Components) {
+      if (typeof Component.options.validate !== 'function') {
+        continue
+      }
+
+      isValid = await Component.options.validate(app.context)
+
+      if (!isValid) {
+        break
+      }
+    }
+  } catch (validationError) {
+    // ...If .validate() threw an error
+    app.context.error({
+      statusCode: validationError.statusCode || '500',
+      message: validationError.message
+    })
+    return renderErrorPage()
+  }
+
   // ...If .validate() returned false
   if (!isValid) {
-    // Don't server-render the page in generate mode
-    if (context._generate) {
-      context.nuxt.serverRendered = false
-    }
-    // Call the 404 error by making the Components array empty
-    Components = []
+    // Render a 404 error page
+    return render404Page()
+  }
+
+  // If no Components found, returns 404
+  if (!Components.length) {
+    return render404Page()
   }
 
   // Call asyncData & fetch hooks on components matched by the route.
-  let asyncDatas = await Promise.all(Components.map(Component => {
-    let promises = []
+  const asyncDatas = await Promise.all(Components.map((Component) => {
+    const promises = []
 
     // Call asyncData(context)
     if (Component.options.asyncData && typeof Component.options.asyncData === 'function') {
-      let promise = promisify(Component.options.asyncData, ctx)
-      promise.then(asyncDataResult => {
-        context.asyncData[Component.cid] = asyncDataResult
+      const promise = promisify(Component.options.asyncData, app.context)
+      promise.then((asyncDataResult) => {
+        ssrContext.asyncData[Component.cid] = asyncDataResult
         applyAsyncData(Component)
         return asyncDataResult
       })
@@ -181,48 +267,30 @@ export default async context => {
     }
 
     // Call fetch(context)
-    if (Component.options.fetch) {
-      promises.push(Component.options.fetch(ctx))
-    }
-    else {
+    if (Component.options.fetch && Component.options.fetch.length) {
+      promises.push(Component.options.fetch(app.context))
+    } else {
       promises.push(null)
     }
 
     return Promise.all(promises)
   }))
 
-  // If no Components found, returns 404
-  if (!Components.length) {
-    context.nuxt.error = context.error({ statusCode: 404, message: 'This page could not be found' })
-  }
-
-  if (asyncDatas.length) debug('Data fetching ' + context.url + ': ' + (Date.now() - s) + 'ms')
+  if (process.env.DEBUG && asyncDatas.length) console.debug('Data fetching ' + ssrContext.url + ': ' + (Date.now() - s) + 'ms')
 
   // datas are the first row of each
-  context.nuxt.data = asyncDatas.map(r => r[0] || {})
+  ssrContext.nuxt.data = asyncDatas.map(r => r[0] || {})
 
-  // If an error occured in the execution
-  if (_app.$options._nuxt.err) {
-    context.nuxt.error = _app.$options._nuxt.err
+  // ...If there is a redirect or an error, stop the process
+  if (ssrContext.redirected) {
+    return noopApp()
+  }
+  if (ssrContext.nuxt.error) {
+    return renderErrorPage()
   }
 
-  
-  // Add the state from the vuex store
-  context.nuxt.state = store.state
-  
-
-  await Promise.all(context.beforeRenderFns.map((fn) => promisify(fn, { Components, nuxtState: context.nuxt })))
-
-  // If no error, return main app
-  if (!context.nuxt.error) {
-    return _app
-  }
-
-  // Load layout for error page
-  layout = (typeof NuxtError.layout === 'function' ? NuxtError.layout(ctx) : NuxtError.layout)
-  context.nuxt.layout = layout || ''
-  await _app.loadLayout(layout)
-  _app.setLayout(layout)
+  // Call beforeNuxtRender methods & add store state
+  await beforeRender()
 
   return _app
 }

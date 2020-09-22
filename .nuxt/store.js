@@ -3,75 +3,63 @@ import Vuex from 'vuex'
 
 Vue.use(Vuex)
 
-// Recursive find files in {srcDir}/store
-const files = require.context('@/store', true, /^\.\/.*\.(js|ts)$/)
-const filenames = files.keys()
+let store = {};
 
-// Store
-let storeData = {}
+(function updateModules () {
+  store = normalizeRoot(require('..\\store\\index.js'), 'store/index.js')
 
-// Check if store/index.js exists
-let indexFilename
-filenames.forEach((filename) => {
-  if (filename.indexOf('./index.') !== -1) {
-    indexFilename = filename
-  }
-})
-if (indexFilename) {
-  storeData = getModule(indexFilename)
-}
+  // If store is an exported method = classic mode (deprecated)
 
-// If store is not an exported method = modules store
-if (typeof storeData !== 'function') {
-
-  // Store modules
-  if (!storeData.modules) {
-    storeData.modules = {}
+  if (typeof store === 'function') {
+    return console.warn('Classic mode for store/ is deprecated and will be removed in Nuxt 3.')
   }
 
-  for (let filename of filenames) {
-    let name = filename.replace(/^\.\//, '').replace(/\.(js|ts)$/, '')
-    if (name === 'index') continue
+  // Enforce store modules
+  store.modules = store.modules || {}
 
-    let namePath = name.split(/\//)
-    let module = getModuleNamespace(storeData, namePath)
+  // If the environment supports hot reloading...
 
-    name = namePath.pop()
-    module[name] = getModule(filename)
-    module[name].namespaced = true
+  if (process.client && module.hot) {
+    // Whenever any Vuex module is updated...
+    module.hot.accept([
+      '..\\store\\index.js',
+    ], () => {
+      // Update `root.modules` with the latest definitions.
+      updateModules()
+      // Trigger a hot update in the store.
+      window.$nuxt.$store.hotUpdate(store)
+    })
   }
-
-}
+})()
 
 // createStore
-export const createStore = storeData instanceof Function ? storeData : () => {
+export const createStore = store instanceof Function ? store : () => {
   return new Vuex.Store(Object.assign({
-    strict: (process.env.NODE_ENV !== 'production'),
-  }, storeData, {
-    state: storeData.state instanceof Function ? storeData.state() : {}
-  }))
+    strict: (process.env.NODE_ENV !== 'production')
+  }, store))
 }
 
-// Dynamically require module
-function getModule (filename) {
-  const file = files(filename)
-  const module = file.default || file
-  if (module.commit) {
-    throw new Error('[nuxt] store/' + filename.replace('./', '') + ' should export a method which returns a Vuex instance.')
+function normalizeRoot (moduleData, filePath) {
+  moduleData = moduleData.default || moduleData
+
+  if (moduleData.commit) {
+    throw new Error(`[nuxt] ${filePath} should export a method that returns a Vuex instance.`)
   }
-  if (module.state && typeof module.state !== 'function') {
-    throw new Error('[nuxt] state should be a function in store/' + filename.replace('./', ''))
+
+  if (typeof moduleData !== 'function') {
+    // Avoid TypeError: setting a property that has only a getter when overwriting top level keys
+    moduleData = Object.assign({}, moduleData)
   }
-  return module
+  return normalizeModule(moduleData, filePath)
 }
 
-function getModuleNamespace (storeData, namePath) {
-  if (namePath.length === 1) {
-    return storeData.modules
+function normalizeModule (moduleData, filePath) {
+  if (moduleData.state && typeof moduleData.state !== 'function') {
+    console.warn(`'state' should be a method that returns an object in ${filePath}`)
+
+    const state = Object.assign({}, moduleData.state)
+    // Avoid TypeError: setting a property that has only a getter when overwriting top level keys
+    moduleData = Object.assign({}, moduleData, { state: () => state })
   }
-  let namespace = namePath.shift()
-  storeData.modules[namespace] = storeData.modules[namespace] || {}
-  storeData.modules[namespace].namespaced = true
-  storeData.modules[namespace].modules = storeData.modules[namespace].modules || {}
-  return getModuleNamespace(storeData.modules[namespace], namePath)
+  return moduleData
 }
