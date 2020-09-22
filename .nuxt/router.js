@@ -1,50 +1,35 @@
 import Vue from 'vue'
 import Router from 'vue-router'
+import { interopDefault } from './utils'
+import scrollBehavior from './router.scrollBehavior.js'
+
+const _a7f4a04a = () => interopDefault(import('..\\pages\\index.vue' /* webpackChunkName: "pages/index" */))
+
+// TODO: remove in Nuxt 3
+const emptyFn = () => {}
+const originalPush = Router.prototype.push
+Router.prototype.push = function push (location, onComplete = emptyFn, onAbort) {
+  return originalPush.call(this, location, onComplete, onAbort)
+}
 
 Vue.use(Router)
 
-const _2c436fa2 = () => import('..\\pages\\index.vue' /* webpackChunkName: "pages\\index" */).then(m => m.default || m)
+export const routerOptions = {
+  mode: 'history',
+  base: decodeURI('/'),
+  linkActiveClass: 'nuxt-link-active',
+  linkExactActiveClass: 'nuxt-link-exact-active',
+  scrollBehavior,
 
+  routes: [{
+    path: "/",
+    component: _a7f4a04a,
+    name: "index"
+  }],
 
-
-const scrollBehavior = (to, from, savedPosition) => {
-  // SavedPosition is only available for popstate navigations.
-  if (savedPosition) {
-    return savedPosition
-  } else {
-    let position = {}
-    // If no children detected
-    if (to.matched.length < 2) {
-      // Scroll to the top of the page
-      position = { x: 0, y: 0 }
-    }
-    else if (to.matched.some((r) => r.components.default.options.scrollToTop)) {
-      // If one of the children has scrollToTop option set to true
-      position = { x: 0, y: 0 }
-    }
-    // If link has anchor, scroll to anchor by returning the selector
-    if (to.hash) {
-      position = { selector: to.hash }
-    }
-    return position
-  }
+  fallback: false
 }
 
-
 export function createRouter () {
-  return new Router({
-    mode: 'history',
-    base: '/',
-    linkActiveClass: 'nuxt-link-active',
-    linkExactActiveClass: 'nuxt-link-exact-active',
-    scrollBehavior,
-    routes: [
-		{
-			path: "/",
-			component: _2c436fa2,
-			name: "index"
-		}
-    ],
-    fallback: false
-  })
+  return new Router(routerOptions)
 }

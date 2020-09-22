@@ -1,8 +1,7 @@
 {
-  "name": "dataViz",
+  "name": "dataviz",
   "version": "1.0.0",
-  "description":
-    "Vue + Vuex + Three.js",
+  "description": "Vue + Vuex + Three.js",
   "author": "chuckbot <cgmilan@gmail.com>",
   "private": true,
   "scripts": {
@@ -10,25 +9,25 @@
     "build": "nuxt build",
     "generate": "nuxt generate",
     "lint": "eslint --ext .js,.vue --ignore-path .gitignore .",
-    "precommit": "npm run lint"
+    "precommit": "yarn run lint"
   },
   "dependencies": {
-    "autoprefixer": "^7.1.4",
-    "babel-preset-env": "^1.6.0",
-    "nuxt": "^1.0.0-rc8",
-    "pug": "^2.0.0-rc.4",
-    "three": "^0.87.1",
-    "vuex": "^2.4.0"
+    "autoprefixer": "^10.0.0",
+    "babel-preset-env": "^1.7.0",
+    "nuxt": "^2.14.6",
+    "pug": "^3.0.0",
+    "three": "^0.120.1",
+    "vuex": "^3.5.1"
   },
   "devDependencies": {
-    "babel-eslint": "^7.2.3",
-    "eslint": "^4.3.0",
-    "eslint-config-standard": "^10.2.1",
-    "eslint-loader": "^1.9.0",
-    "eslint-plugin-html": "^3.1.1",
-    "eslint-plugin-import": "^2.7.0",
-    "eslint-plugin-node": "^5.1.1",
-    "eslint-plugin-promise": "^3.5.0",
-    "eslint-plugin-standard": "^3.0.1"
+    "babel-eslint": "^10.1.0",
+    "eslint": "^7.9.0",
+    "eslint-config-standard": "^14.1.1",
+    "eslint-loader": "^4.0.2",
+    "eslint-plugin-html": "^6.1.0",
+    "eslint-plugin-import": "^2.22.0",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-promise": "^4.2.1",
+    "eslint-plugin-standard": "^4.0.1"
   }
 }
